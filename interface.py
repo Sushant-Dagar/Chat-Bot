@@ -31,6 +31,27 @@ FACTUALS = {
     "prime minister of canada": "Justin Trudeau",
     "president of russia": "Vladimir Putin",
     "prime minister of japan": "Fumio Kishida",
+    "prime minister of pakistan": "Shehbaz Sharif",
+    "president of china": "Xi Jinping",
+    "prime minister of china": "Li Qiang",
+}
+
+CURRENCIES = {
+    "india": "Indian rupee",
+    "usa": "United States dollar",
+    "united states": "United States dollar",
+    "uk": "British pound sterling",
+    "united kingdom": "British pound sterling",
+    "japan": "Japanese yen",
+    "china": "Chinese yuan",
+    "canada": "Canadian dollar",
+    "australia": "Australian dollar",
+    "pakistan": "Pakistani rupee",
+    "france": "Euro",
+    "germany": "Euro",
+    "italy": "Euro",
+    "spain": "Euro",
+    "russia": "Russian ruble",
 }
 
 def normalize_text(s: str) -> str:
@@ -81,14 +102,48 @@ def lookup_factual(question: str):
             return val
     return None
 
+def detect_question_type(text: str):
+    """Detect the type of question being asked (president, prime_minister, etc.)"""
+    txt = normalize_text(text)
+    if 'prime minister' in txt or 'pm of' in txt:
+        return 'prime_minister'
+    elif 'president' in txt:
+        return 'president'
+    elif 'capital' in txt:
+        return 'capital'
+    elif 'currency' in txt:
+        return 'currency'
+    return None
+
+def detect_currency_question(text: str):
+    """Detect currency questions like 'what is the currency of India'"""
+    txt = normalize_text(text)
+    for p in [r"what is the currency of (.+)", r"what's the currency of (.+)",
+              r"currency of (.+)", r"official currency of (.+)"]:
+        m = re.search(p, txt)
+        if m:
+            return normalize_text(m.group(1))
+    return None
+
+def lookup_currency(country: str):
+    """Look up currency for a country"""
+    if not country:
+        return None
+    if country in CURRENCIES:
+        return CURRENCIES[country]
+    match = difflib.get_close_matches(country, CURRENCIES.keys(), n=1, cutoff=0.75)
+    return CURRENCIES[match[0]] if match else None
+
 def detect_followup_country(text: str):
     """Detect follow-up questions like 'and Japan', 'what about Italy', etc."""
     txt = normalize_text(text)
+    # Order matters! More specific patterns first
     patterns = [
-        r"^and\s+(\w+(?:\s+\w+)?)",  # "and Japan", "and United States"
+        r"^and what about\s+(\w+(?:\s+\w+)?)",  # "and what about Japan"
+        r"^and of\s+(\w+(?:\s+\w+)?)",  # "and of Japan"
         r"^what about\s+(\w+(?:\s+\w+)?)",  # "what about Japan"
         r"^how about\s+(\w+(?:\s+\w+)?)",  # "how about Japan"
-        r"^and what about\s+(\w+(?:\s+\w+)?)",  # "and what about Japan"
+        r"^and\s+(\w+(?:\s+\w+)?)",  # "and Japan", "and United States"
     ]
     for pattern in patterns:
         m = re.search(pattern, txt)
@@ -102,7 +157,7 @@ def main():
 
     generator = load_model()
     memory = ChatMemory(max_turns=4)
-    last_question_type = None  # Track question context: 'capital', 'president', 'prime_minister'
+    last_question_type = None  # Track question context: 'capital', 'currency', 'president', 'prime_minister'
 
     while True:
         try:
@@ -125,15 +180,25 @@ def main():
                     print(f"Bot: {cap}")
                     memory.add_turn(user_input, cap)
                     continue
+                # If not found, reconstruct full question for model
+                user_input = f"what is the capital of {followup_country}"
+            elif last_question_type == 'currency':
+                curr = lookup_currency(followup_country)
+                if curr:
+                    print(f"Bot: {curr}")
+                    memory.add_turn(user_input, curr)
+                    continue
+                # If not found, reconstruct full question for model
+                user_input = f"what is the currency of {followup_country}"
             elif last_question_type in ['president', 'prime_minister']:
-                # Try to construct the factual key
-                factual_key = f"{last_question_type} of {followup_country}"
+                # Try to construct the factual key (replace underscore with space)
+                factual_key = f"{last_question_type.replace('_', ' ')} of {followup_country}"
                 factual_key_normalized = normalize_text(factual_key)
 
                 # Search for matching factual
                 found_fact = None
                 for key, val in FACTUALS.items():
-                    if key == factual_key_normalized or followup_country in key:
+                    if key == factual_key_normalized:
                         found_fact = val
                         break
 
@@ -141,6 +206,8 @@ def main():
                     print(f"Bot: {found_fact}")
                     memory.add_turn(user_input, found_fact)
                     continue
+                # If not found, reconstruct full question for model
+                user_input = f"who is the {last_question_type.replace('_', ' ')} of {followup_country}"
 
         country = detect_capital_question(user_input)
         if country:
@@ -160,6 +227,16 @@ def main():
                 last_question_type = 'capital'
                 continue
 
+        # Check for currency questions
+        country_curr = detect_currency_question(user_input)
+        if country_curr:
+            curr = lookup_currency(country_curr)
+            if curr:
+                print(f"Bot: {curr}")
+                memory.add_turn(user_input, curr)
+                last_question_type = 'currency'
+                continue
+
         fact = lookup_factual(user_input)
         if fact:
             print(f"Bot: {fact}")
@@ -171,6 +248,12 @@ def main():
             elif 'prime minister' in q_normalized:
                 last_question_type = 'prime_minister'
             continue
+
+        # Detect question type even if we don't have the answer
+        # This ensures follow-ups work correctly
+        detected_type = detect_question_type(user_input)
+        if detected_type:
+            last_question_type = detected_type
 
         # Build context from previous conversation
         context = memory.get_context()
